@@ -11,11 +11,14 @@
 #include <nettle/ml-kem.h>
 
 #define DER_HEADER_SIZE 98
+/* Shared secret length, independent of ML-KEM variant */
+#define SS_LEN 32
 
 void help(char *name) {
-    printf("Usage: %s -i file -o file -k file -n num [-h]\n", name);
+    printf("Usage: %s -i file -s file  -o file -k file -n num [-h]\n", name);
     printf("\n");
     printf(" -i file    File with concatenated ciphertexts to decrypt\n");
+    printf(" -s file    File with concatenated shared secrets to compare\n");
     printf(" -o file    File where to write the time to decrypt the ciphertext\n");
     printf(" -k file    File with the ML-KEM private key in PEM format\n");
     printf(" -n num     Length of individual ciphertexts in bytes\n");
@@ -188,16 +191,17 @@ int main(int argc, char *argv[]) {
     size_t ciphertext_len = 0;
     FILE *fp;
     char *key_file_name = NULL, *in_file_name = NULL, *out_file_name = NULL;
-    int in_fd = -1, out_fd = -1;
+    char *in_ss_file_name = NULL;
+    int in_fd = -1, in_ss_fd = -1, out_fd = -1;
     uint8_t *key = NULL;
     uint8_t *ciphertext = NULL;
-    uint8_t secret[32];
+    uint8_t secret[SS_LEN], calc_secret[SS_LEN];
     uint16_t *scratch = NULL;
     int opt;
     uint64_t time_before, time_after, time_diff;
     const struct vtable *vtable;
 
-    while ((opt = getopt(argc, argv, "i:o:k:n:h")) != -1 ) {
+    while ((opt = getopt(argc, argv, "i:s:o:k:n:h")) != -1 ) {
         switch (opt) {
             case 'i':
                 in_file_name = optarg;
@@ -223,7 +227,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (!in_file_name || !out_file_name || !key_file_name || !ciphertext_len) {
+    if (!in_file_name || !out_file_name || !key_file_name || !ciphertext_len ||
+        !in_ss_file_name) {
         fprintf(stderr, "Missing parameters!\n");
         help(argv[0]);
         exit(1);
@@ -245,6 +250,12 @@ int main(int argc, char *argv[]) {
     in_fd = open(in_file_name, O_RDONLY);
     if (in_fd == -1) {
         fprintf(stderr, "can't open input file %s\n", in_file_name);
+        goto err;
+    }
+
+    in_ss_fd = open(in_ss_file_name, O_RDONLY);
+    if (in_ss_fd == -1) {
+        fprintf(stderr, "can't open input file %s\n", in_ss_file_name);
         goto err;
     }
 
@@ -288,14 +299,24 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "read less data than expected (truncated file?)\n");
             goto err;
         }
+        r_ret = read(in_ss_fd, secret, SS_LEN);
+        if (r_ret != SS_LEN) {
+            fprintf(stderr, "Shared secret file truncated?\n");
+            goto err;
+        }
 
         time_before = get_time_before();
 
-        vtable->decap(key, secret, ciphertext, scratch);
+        vtable->decap(key, calc_secret, ciphertext, scratch);
 
         time_after = get_time_after();
 
         time_diff = time_after - time_before;
+
+        if (memcmp(calc_secret, secret, SS_LEN) != 0) {
+            fprintf(stderr, "Unexpected shared secret\n");
+            goto err;
+        }
 
         r_ret = write(out_fd, &time_diff, sizeof(time_diff));
         if (r_ret <= 0) {
@@ -320,5 +341,7 @@ int main(int argc, char *argv[]) {
         close(in_fd);
     if (out_fd >= 0)
         close(out_fd);
+    if (in_ss_fd >= 0)
+        close(in_ss_fd);
     return result;
 }
