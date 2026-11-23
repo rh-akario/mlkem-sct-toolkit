@@ -10,10 +10,14 @@
 
 #include <leancrypto.h>
 
+/* shared secret length, independent of ML-KEM variant */
+#define SS_LEN 32
+
 void help(char *name) {
     printf("Usage: %s -i file -o file -k file -n num [-h]\n", name);
     printf("\n");
     printf(" -i file    File with concatenated ciphertexts to decrypt\n");
+    printf(" -s file    File with concatenated shared secrets to compare\n");
     printf(" -o file    File where to write the time to decrypt the ciphertext\n");
     printf(" -k file    File with the raw ML-KEM private key format\n");
     printf(" -n num     Length of individual ciphertexts in bytes\n");
@@ -124,21 +128,27 @@ int main(int argc, char *argv[]) {
     size_t key_len = 0;
     size_t ciphertext_len = 0;
     char *key_file_name = NULL, *in_file_name = NULL, *out_file_name = NULL;
-    int in_fd = -1, out_fd = -1, key_fd = -1;
+    char *in_ss_file_name = NULL;
+    int in_fd = -1, in_ss_fd = -1, out_fd = -1, key_fd = -1;
     struct lc_kyber_ct lc_ciphertext;
     struct lc_kyber_sk lc_key;
     uint8_t *key = NULL;
     uint8_t *ciphertext = NULL;
-    uint8_t secret[32];
+    uint8_t secret[SS_LEN];
+    uint8_t *calc_secret;
+    size_t ss_len = 0;
     struct lc_kyber_ss lc_secret;
     int opt;
     uint64_t time_before, time_after, time_diff;
     const struct ml_kem_params *params;
 
-    while ((opt = getopt(argc, argv, "i:o:k:n:h")) != -1 ) {
+    while ((opt = getopt(argc, argv, "i:s:o:k:n:h")) != -1 ) {
         switch (opt) {
             case 'i':
                 in_file_name = optarg;
+                break;
+            case 's':
+                in_ss_file_name = optarg;
                 break;
             case 'o':
                 out_file_name = optarg;
@@ -161,7 +171,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (!in_file_name || !out_file_name || !key_file_name || !ciphertext_len) {
+    if (!in_file_name || !out_file_name || !key_file_name || !ciphertext_len ||
+        !in_ss_file_name) {
         fprintf(stderr, "Missing parameters!\n");
         help(argv[0]);
         exit(1);
@@ -189,6 +200,13 @@ int main(int argc, char *argv[]) {
         goto err;
     }
 
+    in_ss_fd = open(in_ss_file_name, O_RDONLY);
+    if (in_ss_fd == -1) {
+        fprintf(stderr, "can't open shared secret input file %s\n",
+                in_ss_file_name);
+        goto err;
+    }
+
     out_fd = open(out_file_name, O_WRONLY|O_TRUNC|O_CREAT, 0666);
     if (out_fd == -1) {
         fprintf(stderr, "can't open output file %s\n", out_file_name);
@@ -201,6 +219,9 @@ int main(int argc, char *argv[]) {
         goto err;
     key = malloc(key_len);
     if (!key)
+        goto err;
+    calc_secret = malloc(SS_LEN);
+    if (!calc_secret)
         goto err;
 
     fprintf(stderr, "fopen()\n");
@@ -232,6 +253,11 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "read less data than expected (truncated file?)\n");
             goto err;
         }
+        r_ret = read(in_ss_fd, secret, SS_LEN);
+        if (r_ret != SS_LEN) {
+            fprintf(stderr, "read(in_ss_fd)\n");
+            goto err;
+        }
         r_ret = lc_kyber_ct_load(&lc_ciphertext, ciphertext, ciphertext_len);
         if (r_ret != 0) {
             fprintf(stderr, "lc_kyber_ct_load\n");
@@ -245,6 +271,20 @@ int main(int argc, char *argv[]) {
         time_after = get_time_after();
 
         time_diff = time_after - time_before;
+
+        if (r_ret != 0) {
+            fprintf(stderr, "Calculation of shared secret failed\n");
+            goto err;
+        }
+
+        if (lc_kyber_ss_ptr(&calc_secret, &ss_len, &lc_secret) != 0) {
+            fprintf(stderr, "Extraction of shared secret failed\n");
+            goto err;
+        }
+        if (memcmp(calc_secret, secret, SS_LEN) != 0) {
+            fprintf(stderr, "Unexpected shared secret\n");
+            goto err;
+        }
 
         r_ret = write(out_fd, &time_diff, sizeof(time_diff));
         if (r_ret <= 0) {
@@ -266,6 +306,8 @@ int main(int argc, char *argv[]) {
     free(ciphertext);
     if (in_fd >= 0)
         close(in_fd);
+    if (in_ss_fd >= 0)
+        close(in_ss_fd);
     if (out_fd >= 0)
         close(out_fd);
     return result;

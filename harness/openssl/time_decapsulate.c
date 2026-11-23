@@ -10,10 +10,15 @@
 #include <openssl/rsa.h>
 #include <openssl/pem.h>
 
+/* shared secret length (independent of ML-KEM variant) */
+#define SS_LEN 32
+
+
 void help(char *name) {
-    printf("Usage: %s -i file -o file -k file -n num [-h]\n", name);
+    printf("Usage: %s -i file -s file -o file -k file -n num [-h]\n", name);
     printf("\n");
     printf(" -i file    File with concatenated ciphertexts to decrypt\n");
+    printf(" -s file    File with concatenated shared secrets to compare\n");
     printf(" -o file    File where to write the time to decrypt the ciphertext\n");
     printf(" -k file    File with the RSA private key in PEM format\n");
     printf(" -n num     Length of individual ciphertexts in bytes\n");
@@ -127,13 +132,14 @@ int main(int argc, char *argv[]) {
     size_t ciphertext_len = 0;
     FILE *fp;
     char *key_file_name = NULL, *in_file_name = NULL, *out_file_name = NULL;
-    int in_fd = -1, out_fd = -1;
+    char *in_ss_file_name = NULL;
+    int in_fd = -1, in_ss_fd = -1, out_fd = -1;
     unsigned char *ciphertext = NULL;
-    unsigned char *plaintext = NULL;
+    unsigned char *calc_plaintext = NULL, *plaintext = NULL;
     int opt;
     uint64_t time_before, time_after, time_diff;
 
-    while ((opt = getopt(argc, argv, "i:o:k:n:h")) != -1 ) {
+    while ((opt = getopt(argc, argv, "i:s:o:k:n:h")) != -1 ) {
         switch (opt) {
             case 'i':
                 in_file_name = optarg;
@@ -159,7 +165,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (!in_file_name || !out_file_name || !key_file_name || !ciphertext_len) {
+    if (!in_file_name || !out_file_name || !key_file_name || !ciphertext_len ||
+        !in_ss_file_name) {
         fprintf(stderr, "Missing parameters!\n");
         help(argv[0]);
         exit(1);
@@ -171,6 +178,13 @@ int main(int argc, char *argv[]) {
         goto err;
     }
 
+    in_ss_fd = open(in_ss_file_name, O_RDONLY);
+    if (in_ss_fd == -1) {
+        fprintf(stderr, "Can't open input shared secret file %s\n",
+                in_ss_file_name);
+        goto err;
+    }
+
     out_fd = open(out_file_name, O_WRONLY|O_TRUNC|O_CREAT, 0666);
     if (out_fd == -1) {
         fprintf(stderr, "can't open output file %s\n", out_file_name);
@@ -178,8 +192,12 @@ int main(int argc, char *argv[]) {
     }
 
     fprintf(stderr, "malloc(plaintext)\n");
-    plaintext = malloc(ciphertext_len);
+    plaintext = malloc(SS_LEN);
     if (!plaintext)
+        goto err;
+
+    calc_plaintext = malloc(SS_LEN);
+    if (!calc_plaintext)
         goto err;
 
     fprintf(stderr, "malloc(ciphertext)\n");
@@ -219,12 +237,18 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "read less data than expected (truncated file?)\n");
             goto err;
         }
+        r_ret = read(in_ss_fd, plaintext, SS_LEN);
+        if (r_ret != SS_LEN) {
+            fprintf(stderr, "read less shared secret that expected "
+                    "(truncated file?)\n");
+            goto err;
+        }
 
         plaintext_len = ciphertext_len;
 
         time_before = get_time_before();
 
-        r_ret = EVP_PKEY_decapsulate(ctx, plaintext, &plaintext_len,
+        r_ret = EVP_PKEY_decapsulate(ctx, calc_plaintext, &plaintext_len,
                                      ciphertext, ciphertext_len);
 
         time_after = get_time_after();
@@ -235,8 +259,13 @@ int main(int argc, char *argv[]) {
             goto err;
         }
 
-        if (plaintext_len != 32) {
+        if (plaintext_len != SS_LEN) {
             fprintf(stderr, "Unexpected plaintext length: %lu\n", plaintext_len);
+            goto err;
+        }
+
+        if (memcmp(calc_plaintext, plaintext, SS_LEN) != 0) {
+            fprintf(stderr, "Unexpected shared secret value\n");
             goto err;
         }
 
@@ -269,6 +298,8 @@ int main(int argc, char *argv[]) {
         EVP_PKEY_free(pkey);
     if (in_fd >= 0)
         close(in_fd);
+    if (in_ss_fd >= 0)
+        close(in_ss_fd);
     if (out_fd >= 0)
         close(out_fd);
     return result;

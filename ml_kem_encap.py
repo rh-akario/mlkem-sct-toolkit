@@ -4,7 +4,7 @@ import getopt
 import ecdsa.der as der
 import random
 from threading import Thread, Event
-from kyber_py.ml_kem.pkcs import ek_from_pem
+from kyber_py.ml_kem.pkcs import ek_from_pem, dk_from_pem
 from tlsfuzzer.utils.log import Log
 from tlsfuzzer.utils.progress_report import progress_report
 
@@ -157,6 +157,7 @@ Generate ciphertexts for testing ML-KEM decapsulation interface against
 timing side-channel.
 
 -c key.pem       Path to PEM-encoded ML-KEM encapsulation key.
+-d key.pem       Path to PEM-encoded ML-KEM decapsulation key,
 -o dir           Directory that will contain the generated ciphertexts.
                  "ciphertexts" by default.
 --describe=name  Describe the specified probe
@@ -179,7 +180,8 @@ Supported probes:
 
 
 def gen_timing_probes(out_dir, pub, kem, args, repeat, verbose=False,
-                      status_delay=None, status_newline=None):
+                      status_delay=None, status_newline=None, priv_key=None):
+    ss_out = None
     generator = CiphertextGenerator(kem, pub)
 
     probes = {}
@@ -244,6 +246,10 @@ def gen_timing_probes(out_dir, pub, kem, args, repeat, verbose=False,
                               kwargs=kwargs)
             progress.start()
 
+
+        if priv_key:
+            ss_out = open(os.path.join(out_dir, "shared_sec.bin"), "wb")
+
         with open(os.path.join(out_dir, "ciphers.bin"), "wb") as out:
             # start the ciphertext generation
             for executed, index in enumerate(log.iterate_log()):
@@ -255,11 +261,16 @@ def gen_timing_probes(out_dir, pub, kem, args, repeat, verbose=False,
                 ciphertext = p_method(*p_params)
 
                 out.write(ciphertext)
+
+                if ss_out:
+                    ss_out.write(kem.decaps(priv_key, ciphertext))
     finally:
         if verbose:
             status[2].set()
             progress.join()
             print()
+        if ss_out:
+            ss_out.close()
 
     print("done")
 
@@ -267,6 +278,7 @@ def gen_timing_probes(out_dir, pub, kem, args, repeat, verbose=False,
 
 if __name__ == "__main__":
     key = None
+    priv_key = None
     kem = None
     out_dir = "ciphertexts"
     repeat = None
@@ -276,14 +288,18 @@ if __name__ == "__main__":
     status_newline = None
 
     argv = sys.argv[1:]
-    opts, args = getopt.getopt(argv, "c:o:", ["help", "describe=", "repeat=",
-                                              "force", "verbose",
-                                              "status-delay=",
-                                              "status-newline"])
+    opts, args = getopt.getopt(argv, "c:o:d:",
+                               ["help", "describe=", "repeat=",
+                                "force", "verbose",
+                                "status-delay=",
+                                "status-newline"])
     for opt, arg in opts:
         if opt == "-c":
             with open(arg, "r") as key_fd:
                 kem, key = ek_from_pem(key_fd.read())
+        elif opt == "-d":
+            with open(arg, "r") as key_fd:
+                priv_kem, priv_key, _, key2 = dk_from_pem(key_fd.read())
         elif opt == "-o":
             out_dir = arg
         elif opt == "--help":
@@ -319,6 +335,16 @@ if __name__ == "__main__":
         print("ERROR: No encapsulation key specified", file=sys.stderr)
         sys.exit(1)
 
+    if priv_key:
+        if kem != priv_kem:
+            print("ERROR: KEM size of encapsulation and decapsulation "
+                  "keys doesn't match", file=sys.stderr)
+            sys.exit(1)
+        if key != key2:
+            print("ERROR: encapsulatio and decapsulation keys don't match",
+                  file=sys.stderr)
+            sys.exit(1)
+
     if repeat is not None and repeat <= 0:
         print("ERROR: repeat must be a positive integer", file=sys.stder)
         sys.exit(1)
@@ -334,9 +360,9 @@ if __name__ == "__main__":
             raise
 
     if repeat is None:
-        single_shot(out_dir, key, kem, args)
+        single_shot(out_dir, key, kem, args, priv_key)
     else:
         gen_timing_probes(out_dir, key, kem, args, repeat, verbose,
-                          status_delay, status_newline)
+                          status_delay, status_newline, priv_key)
 
     print("done")

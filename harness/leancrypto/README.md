@@ -10,6 +10,7 @@ dnf install -y --enablerepo='*' meson gcc
 Sources:
 ```
 git clone --depth=1 https://github.com/smuellerDD/leancrypto.git
+cd leancrypto
 ```
 
 Compilation and installation
