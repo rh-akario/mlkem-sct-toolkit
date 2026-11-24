@@ -144,6 +144,9 @@ int main(int argc, char *argv[]) {
             case 'i':
                 in_file_name = optarg;
                 break;
+            case 's':
+                in_ss_file_name = optarg;
+                break;
             case 'o':
                 out_file_name = optarg;
                 break;
